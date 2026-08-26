@@ -77,12 +77,18 @@ class BotClient {
         const shared = [];
         for (const guild of this.client.guilds.cache.values()) {
             try {
-                const member = await guild.members.fetch({
-                    user: config.targetUserId,
-                    force: true,
-                    withPresences: true
-                });
-                if (member) {
+                let member = null;
+                try {
+                    const fetched = await guild.members.fetch({
+                        user: [config.targetUserId],
+                        withPresences: true
+                    });
+                    member = (fetched && typeof fetched.get === 'function') ? fetched.get(config.targetUserId) : fetched;
+                } catch (_) {
+                    member = await guild.members.fetch(config.targetUserId);
+                }
+
+                if (member && (member.id === config.targetUserId || member.user?.id === config.targetUserId)) {
                     shared.push({
                         guild,
                         member,
@@ -140,8 +146,11 @@ class BotClient {
             };
             this.lastFingerprint = `${status}:${devices}`;
 
+            const memberTag = member?.user?.tag || member?.user?.username || member?.displayName || config.targetUserId;
+            const memberId = member?.id || member?.user?.id || config.targetUserId;
+
             console.log(`[Bot] ✅ Servidor compartilhado encontrado: "${guild.name}" (ID: ${guild.id})`);
-            console.log(`[Bot] Membro: ${member.user.tag} (ID: ${member.user.id})`);
+            console.log(`[Bot] Membro: ${memberTag} (ID: ${memberId})`);
             console.log(`[Bot] Status inicial sincronizado: ${status} | Dispositivos: [${Object.keys(clientStatus).join(', ') || 'Nenhum'}]`);
         } catch (e) {
             console.warn('[Bot] Falha ao sincronizar presença inicial:', e.message);
