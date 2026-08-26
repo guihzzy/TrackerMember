@@ -80,12 +80,12 @@ class SelfbotClient {
                 } catch (_) {}
             }
 
-            // 2. Fallback: Se não encontrou, busca através do Bot Oficial
-            if (!user && this.bot?.client) {
+            // 2. Fallback: Se não encontrou, busca através do Bot Oficial no servidor compartilhado
+            if (!user && this.bot?.fetchPresenceFromSharedGuild) {
                 try {
-                    const botUser = await this.bot.client.users.fetch(config.targetUserId);
-                    if (botUser) {
-                        user = botUser;
+                    const sharedData = await this.bot.fetchPresenceFromSharedGuild();
+                    if (sharedData && sharedData.member) {
+                        user = sharedData.member.user;
                     }
                 } catch (_) {}
             }
@@ -270,14 +270,12 @@ class SelfbotClient {
 
         // PRESENCE_UPDATE (WebSocket Presence do selfbot para garantir detecção imediata de dispositivos)
         if (eventType === 'PRESENCE_UPDATE' && data.user && data.user.id === config.targetUserId) {
-            if (data.client_status) {
-                await this.bot.handleRawPresence({
-                    userId: data.user.id,
-                    status: data.status,
-                    clientStatus: data.client_status,
-                    user: data.user
-                });
-            }
+            await this.bot.handleRawPresence({
+                userId: data.user.id,
+                status: data.status,
+                clientStatus: data.client_status || {},
+                user: data.user
+            });
         }
     }
 
