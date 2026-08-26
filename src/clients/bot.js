@@ -39,19 +39,29 @@ class BotClient {
         this.lastEventTime = 0;
         this.lastAvatarSentUrl = null;
         this.lastAvatarSentTime = 0;
+        this.sharedGuilds = new Map();
+        this.presenceInterval = null;
 
         this.setupEvents();
     }
 
     setupEvents() {
-        this.client.on(Events.ClientReady, () => {
+        this.client.on(Events.ClientReady, async () => {
             console.log(`[Bot] Conectado como ${this.client.user.tag} (ID: ${this.client.user.id})`);
-            this.syncInitialPresence();
+            await this.syncInitialPresence();
+            this.startPresenceSyncInterval();
         });
 
-        this.client.on('presenceUpdate', (oldPresence, newPresence) => {
+        this.client.on(Events.PresenceUpdate, async (oldPresence, newPresence) => {
             if (!newPresence || newPresence.userId !== config.targetUserId) return;
-            this.handlePresenceUpdate(oldPresence, newPresence);
+            await this.handlePresenceUpdate(oldPresence, newPresence);
+        });
+
+        this.client.on(Events.GuildMemberAdd, async (member) => {
+            if (member.id === config.targetUserId) {
+                console.log(`[Bot] Membro monitorado entrou no servidor "${member.guild.name}" (${member.guild.id})`);
+                await this.syncInitialPresence();
+            }
         });
 
         this.client.on('error', (err) => {
@@ -60,46 +70,127 @@ class BotClient {
     }
 
     /**
-     * Tenta buscar o status inicial do usuário monitorado nos servidores do bot
+     * Procura todos os servidores em que o bot e o membro monitorado estão juntos
+     * @returns {Promise<Array<{ guild: import('discord.js').Guild, member: import('discord.js').GuildMember, presence: import('discord.js').Presence | null }>>}
      */
-    syncInitialPresence() {
-        try {
-            for (const guild of this.client.guilds.cache.values()) {
-                const member = guild.members.cache.get(config.targetUserId);
-                if (member && member.presence) {
-                    const status = member.presence.status || 'offline';
-                    const clientStatus = member.presence.clientStatus || {};
-                    const devices = Object.keys(clientStatus).filter(d => Boolean(clientStatus[d])).sort().join(',');
-                    
-                    this.lastPresence = {
-                        status: status,
-                        clientStatus: clientStatus
-                    };
-                    this.lastFingerprint = `${status}:${devices}`;
-                    console.log(`[Bot] Presença inicial sincronizada para ${config.targetUserId}:`, this.lastPresence);
-                    break;
+    async findSharedGuilds() {
+        const shared = [];
+        for (const guild of this.client.guilds.cache.values()) {
+            try {
+                const member = await guild.members.fetch({
+                    user: config.targetUserId,
+                    force: true,
+                    withPresences: true
+                });
+                if (member) {
+                    shared.push({
+                        guild,
+                        member,
+                        presence: member.presence || null
+                    });
+                    this.sharedGuilds.set(guild.id, guild);
                 }
+            } catch (_) {
+                // O membro não está neste servidor
             }
+        }
+        return shared;
+    }
+
+    /**
+     * Busca o status e presença atualizados do membro no servidor compartilhado com o bot
+     */
+    async fetchPresenceFromSharedGuild() {
+        const sharedList = await this.findSharedGuilds();
+        if (sharedList.length === 0) {
+            return null;
+        }
+
+        // Dá prioridade para o servidor onde o membro possui presença ativa (online/idle/dnd)
+        const active = sharedList.find(s => s.presence && s.presence.status !== 'offline') || sharedList[0];
+        return {
+            guild: active.guild,
+            member: active.member,
+            presence: active.presence,
+            status: active.presence?.status || 'offline',
+            clientStatus: active.presence?.clientStatus || {}
+        };
+    }
+
+    /**
+     * Localiza o servidor compartilhado entre o bot e o membro e sincroniza o status inicial
+     */
+    async syncInitialPresence() {
+        try {
+            console.log(`[Bot] Buscando servidores compartilhados com o membro ${config.targetUserId}...`);
+            const data = await this.fetchPresenceFromSharedGuild();
+
+            if (!data) {
+                console.warn(`[Bot] ⚠️ O membro ${config.targetUserId} NÃO foi encontrado em nenhum servidor em que o bot está.`);
+                console.warn(`[Bot] Certifique-se de que o bot e o usuário monitorado estejam no mesmo servidor do Discord e que a 'Presence Intent' esteja ativada no Developer Portal.`);
+                return;
+            }
+
+            const { guild, member, status, clientStatus } = data;
+            const devices = Object.keys(clientStatus).filter(d => Boolean(clientStatus[d])).sort().join(',');
+
+            this.lastPresence = {
+                status: status,
+                clientStatus: clientStatus
+            };
+            this.lastFingerprint = `${status}:${devices}`;
+
+            console.log(`[Bot] ✅ Servidor compartilhado encontrado: "${guild.name}" (ID: ${guild.id})`);
+            console.log(`[Bot] Membro: ${member.user.tag} (ID: ${member.user.id})`);
+            console.log(`[Bot] Status inicial sincronizado: ${status} | Dispositivos: [${Object.keys(clientStatus).join(', ') || 'Nenhum'}]`);
         } catch (e) {
             console.warn('[Bot] Falha ao sincronizar presença inicial:', e.message);
         }
     }
 
     /**
-     * Processa presença repassada pelo selfbot caso o bot não receba
+     * Inicia a verificação periódica de presença no servidor compartilhado
+     */
+    startPresenceSyncInterval() {
+        if (this.presenceInterval) clearInterval(this.presenceInterval);
+        this.presenceInterval = setInterval(async () => {
+            try {
+                const data = await this.fetchPresenceFromSharedGuild();
+                if (data && data.presence) {
+                    await this.handlePresenceUpdate(this.lastPresence, data.presence);
+                }
+            } catch (_) {
+                // Silencioso em caso de erro transitório
+            }
+        }, 20000);
+    }
+
+    /**
+     * Processa presença repassada pelo selfbot caso o bot receba evento bruto
      */
     async handleRawPresence({ userId, status, clientStatus, user }) {
         if (userId !== config.targetUserId) return;
+
+        // Tenta puxar a presença real direto do servidor compartilhado
+        const sharedData = await this.fetchPresenceFromSharedGuild();
+        if (sharedData && sharedData.presence) {
+            await this.handlePresenceUpdate(this.lastPresence, sharedData.presence);
+            return;
+        }
+
+        const effectiveStatus = status || (clientStatus && Object.keys(clientStatus).length > 0 ? 'online' : 'offline');
         const fakePresence = {
             userId,
-            status,
+            status: effectiveStatus,
             clientStatus: clientStatus || {},
             member: {
                 user: {
                     id: userId,
                     tag: user?.tag || user?.username || userId,
                     username: user?.username || userId,
-                    displayAvatarURL: (opts) => user?.avatar ? `https://cdn.discordapp.com/avatars/${userId}/${user.avatar}.${opts?.extension || 'png'}?size=${opts?.size || 1024}` : null
+                    displayAvatarURL: (opts) => user?.avatar
+                        ? `https://cdn.discordapp.com/avatars/${userId}/${user.avatar}.${opts?.extension || 'png'}?size=${opts?.size || 1024}`
+                        : `https://cdn.discordapp.com/embed/avatars/${(BigInt(userId) >> 22n) % 6n}.png`
                 }
             }
         };
@@ -142,14 +233,26 @@ class BotClient {
             this.lastFingerprint = currentFingerprint;
             this.lastEventTime = now;
 
+            // Resolve dados do usuário (priorizando fetch caso falte informações)
+            let userObj = newPresence.member?.user || newPresence.user;
+            if (!userObj || !userObj.username) {
+                try {
+                    userObj = await this.client.users.fetch(newPresence.userId);
+                } catch (_) {}
+            }
+
             const user = {
                 id: newPresence.userId,
-                tag: newPresence.member?.user?.tag || newPresence.member?.user?.username || newPresence.userId,
-                username: newPresence.member?.user?.username || newPresence.userId,
-                avatarURL: newPresence.member?.user?.displayAvatarURL ? newPresence.member.user.displayAvatarURL({ extension: 'png', size: 1024 }) : null
+                tag: userObj?.tag || userObj?.username || newPresence.userId,
+                username: userObj?.username || newPresence.userId,
+                avatarURL: userObj?.displayAvatarURL
+                    ? userObj.displayAvatarURL({ extension: 'png', size: 1024 })
+                    : (userObj?.avatar
+                        ? `https://cdn.discordapp.com/avatars/${newPresence.userId}/${userObj.avatar}.png?size=1024`
+                        : `https://cdn.discordapp.com/embed/avatars/${(BigInt(newPresence.userId) >> 22n) % 6n}.png`)
             };
 
-            console.log(`[Bot] Mudança de presença para ${user.tag}: [${prevDevices.join(', ')}] -> [${newDevices.join(', ')}]`);
+            console.log(`[Bot] Mudança de presença para ${user.tag}: [${prevDevices.join(', ')}] -> [${newDevices.join(', ')}] (Status: ${newStatus})`);
 
             // Caso 1: Ficou Online de vez (tinha 0 dispositivos e agora tem 1+)
             if (prevDevices.length === 0 && newDevices.length > 0) {
