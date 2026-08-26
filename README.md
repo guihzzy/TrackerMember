@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛰️ TrackerMember
+# TrackerMember
 
 **Sistema de Monitoramento Discord em Tempo Real com Discord Components V2**
 
