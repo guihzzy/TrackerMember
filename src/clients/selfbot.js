@@ -85,7 +85,19 @@ class SelfbotClient {
                 try {
                     const sharedData = await this.bot.fetchPresenceFromSharedGuild();
                     if (sharedData && sharedData.member) {
-                        user = sharedData.member.user;
+                        const m = sharedData.member;
+                        const u = m.user || m;
+                        user = {
+                            id: u.id || config.targetUserId,
+                            username: u.username || m.displayName || config.targetUserId,
+                            avatar: u.avatar,
+                            tag: u.tag || u.username || m.displayName || config.targetUserId,
+                            displayAvatarURL: (opts) => u.displayAvatarURL
+                                ? u.displayAvatarURL(opts)
+                                : (u.avatar
+                                    ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.${opts?.extension || 'png'}?size=${opts?.size || 1024}`
+                                    : `https://cdn.discordapp.com/embed/avatars/${(BigInt(u.id || config.targetUserId) >> 22n) % 6n}.png`)
+                        };
                     }
                 } catch (_) {}
             }
